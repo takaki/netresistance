@@ -145,3 +145,7 @@ server.pid
 /dist/
 .cache
 
+/.gitignore
+
+# local
+react/bulid

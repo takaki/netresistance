@@ -1,10 +1,10 @@
-name := "resistance"
+name := "netresistance"
 
 version := "0.0.20160719"
 
-lazy val `resistance` = (project in file(".")).enablePlugins(PlayScala)
+lazy val `netresistance` = (project in file(".")).enablePlugins(PlayScala)
 
-scalaVersion := "2.11.7"
+scalaVersion := "2.11.8"
 
 libraryDependencies ++= Seq(jdbc, cache, ws, specs2 % Test)
 
