@@ -7,7 +7,7 @@ import org.specs2.runner.JUnitRunner
 
 @RunWith(classOf[JUnitRunner])
 class GameSpec extends Specification {
-  val members = Seq(MemberImpl("0", Role.Assassin),
+  val members = Set(MemberImpl("0", Role.Assassin),
     MemberImpl("1", Role.Spy),
     MemberImpl("2", Role.Spy),
     MemberImpl("3", Role.Resistance),
@@ -25,7 +25,7 @@ class GameSpec extends Specification {
     val game = ResistanceGameImpl(allMembers,
       voteTrack = VoteTrackImpl(allMembers, Option(VoteRecordImpl(allMembers))),
       missionTrack = MissionTrackImpl(allMembers),
-      eventQueue = EventTableImpl(afterResistanceWin = Seq(AssassinationEvent)))
+      eventTable = EventTableImpl(afterResistanceWin = Seq(AssassinationEvent)))
 
 
 

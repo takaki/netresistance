@@ -19,7 +19,7 @@ case class MissionTrackImpl(allMembers: AllMembers,
       .map(mission => this.copy(mission = Option(mission)))
   }
 
-  override def close(): Either[MissionLog, MissionTrack] = {
+  override def close: Either[MissionLog, MissionTrack] = {
     mission.toRight(MissionError(this, "Mission is not open")).right
       .flatMap(_.result(allMembers)).right
       .map(result => this.copy(mission = None, missionHistory = missionHistory.add(result)))

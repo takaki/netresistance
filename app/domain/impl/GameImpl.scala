@@ -6,7 +6,7 @@ import scala.util.Random
 
 //case class MemberImpl(name: String, uuid: UUID = randomUUID(), role: Role = Role.Resistance) extends Member {
 
-case class MemberImpl(name: String, role: Role = Role.Resistance) extends Member {
+case class MemberImpl(id: String, role: Role = Role.Resistance) extends Member {
   override def assignRole(role: Role): Member = this.copy(role = role)
 }
 
@@ -56,11 +56,14 @@ case class AllMembers(members: Seq[Member],
 
   def rotateLeader: AllMembers = this.copy(leaderMarker = leaderMarker.rotate)
 
-  def inquisitor: Option[Member] = inquisitorToken.map(_.inquisitor(members))
+  def inquisitor: Either[GameError, Member] =
+    inquisitorToken.map(_.inquisitor(members)).toRight(GameError(this, "No Inquisitor."))
 
-  def passInquisitor(target: Member): Option[AllMembers] = inquisitorToken.map(token => this.copy(inquisitorToken = Option(token.pass(target, members))))
+  def passInquisitor(target: Member): Either[GameError, AllMembers] =
+    inquisitorToken.map(token => this.copy(inquisitorToken = Option(token.pass(target, members)))).toRight(GameError(this, "No Inquisitor"))
 
-  def isExamined(target: Member): Option[Boolean] = inquisitorToken.map(_.isExamined(target, members))
+  def isExamined(target: Member): Either[GameError, Boolean] =
+    inquisitorToken.map(_.isExamined(target, members)).toRight(GameError(this, "No Inquisitor"))
 
 }
 
@@ -107,121 +110,127 @@ case class InquisitorTokenImpl(position: Int = -1, examined: Set[Member] = Set.e
 case class ResistanceGameImpl(allMembers: AllMembers,
                               voteTrack: VoteTrack,
                               missionTrack: MissionTrack,
-                              eventQueue: EventTable,
+                              eventTable: EventTable = EventTableImpl(),
                               winner: Option[Affiliation] = None,
                               logQueue: LogQueue = LogQueueImpl()
                              ) extends ResistanceGame {
 
-  private def checkEventEmpty = Either.cond(eventQueue.queueEmpty, this, GameError(this, "event running"))
+  def this(allMembers: AllMembers) = this(allMembers,
+    voteTrack = VoteTrackImpl(allMembers, Option(VoteRecordImpl(allMembers))),
+    missionTrack = MissionTrackImpl(allMembers))
 
-  override def assignTeam(leader: Member, teamMembers: TeamMembers): Either[LogMessage, ResistanceGame] = {
+  override def assignTeam(leader: Member, teamMembers: TeamMembers): Either[LogMessage, ResistanceGame] = checkEventEmpty {
     for {
-      game <- checkEventEmpty.right
       _ <- Either.cond(leader == allMembers.leader, (), GameError(this, "startTemVote: not leader")).right
-    } yield voteTrack.openBallot(teamMembers).fold(game.addLog(_), voteTrack => game.copy(voteTrack = voteTrack))
+    } yield voteTrack.openBallot(teamMembers).fold(this.addLog(_), voteTrack => this.copy(voteTrack = voteTrack))
   }
 
-  override def submitVoteToken(member: Member, voteToken: VoteToken): Either[LogMessage, ResistanceGame] = {
-    val submitted = checkEventEmpty.right
-      .map(game => voteTrack.submit(member, voteToken).fold(game.addLog(_),
-        voteTrack => game.copy(voteTrack = voteTrack).addLog(GameVoteSubmitted(member, voteToken))))
-    val closed = submitted.right
-      .map(game => game.voteTrack.closeBallot.fold(game.addLog(_),
-        voteTrack => game.copy(voteTrack = voteTrack, allMembers = allMembers.rotateLeader)))
-    closed.right.flatMap(game => game.voteTrack.result.fold(log => Right(game.addLog(log)),
+  override def submitVoteToken(member: Member, voteToken: VoteToken): Either[LogMessage, ResistanceGame] = checkEventEmpty {
+    val submitted = voteTrack.submit(member, voteToken)
+      .fold(this.addLog(_),
+        voteTrack => this.copy(voteTrack = voteTrack).addLog(GameVoteSubmitted(member, voteToken)))
+    val closed = submitted.voteTrack.closeBallot
+      .fold(submitted.addLog(_),
+        voteTrack => submitted.copy(voteTrack = voteTrack, allMembers = allMembers.rotateLeader))
+    closed.voteTrack.result.fold(log => Right(closed.addLog(log)),
       result =>
         if (result.majority == VoteMajority.Approved) {
           for {
-            voteTrack <- game.voteTrack.endTrack.right
+            voteTrack <- closed.voteTrack.endTrack.right
             missionTrack <- missionTrack.open(result.teamMembers).right
           } yield {
-            game.copy(voteTrack = voteTrack, missionTrack = missionTrack).addLog(GameVoteApprove)
+            closed.copy(voteTrack = voteTrack, missionTrack = missionTrack).addLog(GameVoteApprove)
           }
         } else {
-          game.voteTrack.spyWin.right.map(spyWin =>
+          closed.voteTrack.spyWin.right.map(spyWin =>
             if (!spyWin)
-              game.addLog(GameVoteReject)
+              closed.addLog(GameVoteReject)
             else
-              game.copy(winner = Option(Affiliation.Spy)).addLog(GameVoteReject).addLog(GameSpyWinFiveVoteRejects))
-        }))
+              closed.copy(winner = Option(Affiliation.Spy)).addLog(GameVoteReject).addLog(GameSpyWinFiveVoteRejects))
+        })
   }
 
-  override def submitMissionCard(member: Member, missionCard: MissionCard): Either[LogMessage, ResistanceGame] = {
-    val submitted = checkEventEmpty.right.map(game => game.missionTrack.submit(member, missionCard)
-      .fold(game.addLog(_),
-        missionTrack => game.copy(missionTrack = missionTrack).addLog(GameMissionSubmit(member, missionCard))))
-    submitted.right.flatMap(game => game.missionTrack.close.fold(log => Right(game.addLog(log)),
+  override def submitMissionCard(member: Member, missionCard: MissionCard): Either[LogMessage, ResistanceGame] = checkEventEmpty {
+    val submitted = missionTrack.submit(member, missionCard)
+      .fold(this.addLog(_),
+        missionTrack => this.copy(missionTrack = missionTrack).addLog(GameMissionSubmit(member, missionCard)))
+    submitted.missionTrack.close.fold(log => Right(submitted.addLog(log)),
       missionTrack => {
-        val logged = game.addLog(GameMissionClosed(missionTrack.history.last.isSuccess))
+        val logged = submitted.addLog(GameMissionClosed(missionTrack.history.last.isSuccess))
         missionTrack.gameWinner match {
-          case Some(Affiliation.Resistance) => Right(if (eventQueue.afterResistanceWin.isEmpty) {
+          case Some(Affiliation.Resistance) => Right(if (eventTable.afterResistanceWin.isEmpty) {
             logged.copy(winner = Option(Affiliation.Resistance))
               .addLog(GameResistanceWin)
           } else {
-            logged.copy(eventQueue = eventQueue.fireAfterResistanceWin)
+            logged.copy(eventTable = eventTable.fireAfterResistanceWin)
           })
           case Some(Affiliation.Spy) => Right(logged.copy(winner = Option(Affiliation.Spy)).addLog(GameSpyWin))
           case None => logged.voteTrack.startTrack.right.map(voteTrack =>
-            logged.copy(eventQueue = eventQueue.fireBeforeMission(missionTrack.round),
+            logged.copy(eventTable = eventTable.fireBeforeMission(missionTrack.round),
               missionTrack = missionTrack, voteTrack = voteTrack))
         }
-      }))
+      })
   }
 
   override def assassination(assassin: Member, target: Member): Either[LogMessage, ResistanceGame] = {
-    for {
-      event <- eventQueue.getEvent.right
-      _ <- Either.cond(event == AssassinationEvent, (), GameError(this, s"not $AssassinationEvent event")).right
-      r <- Either.cond(assassin.role == Role.Assassin,
-        if (target.role == Role.Commander) {
-          this.copy(winner = Option(Affiliation.Spy))
-            .addLog(GameSpyWinAssassination)
-
-        } else {
-          this.copy(winner = Option(Affiliation.Resistance))
-            .addLog(GameResistanceWinAssassinationFailed)
-        }, GameError(this, "not assassin can not do assassination. " + assassin.role)
-      ).right
-      rv <- r.eventFinish.right
-    } yield rv
+    runEvent(AssassinationEvent) {
+      for {
+        _ <- Either.cond(assassin.role == Role.Assassin, (), GameError(this, "$assasin is not Assassin.")).right
+      } yield if (target.role == Role.Commander) {
+        this.copy(winner = Option(Affiliation.Spy)).addLog(GameSpyWinAssassination)
+      } else {
+        this.copy(winner = Option(Affiliation.Resistance)).addLog(GameResistanceWinAssassinationFailed)
+      }
+    }
   }
 
   override def examination(inquisitor: Member, target: Member): Either[LogMessage, ResistanceGame] = {
-    for {
-      event <- eventQueue.getEvent.right
-      _ <- Either.cond(event == InquisitorEvent, (), GameError(this, s"not $InquisitorEvent event")).right
-      check <- allMembers.inquisitor.map(_ == inquisitor).toRight(GameError(this, "no inquisitor")).right
-      _ <- Either.cond(check, (), GameError(this, s"$inquisitor is not a inquisitor.")).right
-      isExamined <- allMembers.isExamined(target).toRight(GameError(this, "no inquisitor")).right
-      _ <- Either.cond(isExamined, (), GameError(this, s"$target is already examined")).right
-      members <- allMembers.passInquisitor(target).toRight(GameError(this, "no inquisitor")).right
-    } yield this.copy(allMembers = members).addLog(GameInquisitorExamination(inquisitor, target, target.role.affiliation))
+    runEvent(InquisitorEvent) {
+      for {
+        check <- allMembers.inquisitor.right.map(_ == inquisitor).right
+        _ <- Either.cond(check, (), GameError(this, s"$inquisitor is not Inquisitor.")).right
+        isExamined <- allMembers.isExamined(target).right
+        _ <- Either.cond(isExamined, (), GameError(this, s"$target is already examined.")).right
+        members <- allMembers.passInquisitor(target).right
+      } yield this.copy(allMembers = members).addLog(GameInquisitorExamination(inquisitor, target, target.role.affiliation))
+    }
+
   }
 
   override def leader: Member = allMembers.leader
 
   override def log: Seq[LogMessage] = logQueue.queue
 
-  def addLog(logMessage: LogMessage) = this.copy(logQueue = logQueue.add(logMessage))
+  override def logFlush: ResistanceGame = this.copy(logQueue = LogQueueImpl())
 
   override def voteResultHistory: VoteRecord = {
     voteTrack.resultHistory
   }
 
-  override def logFlush: ResistanceGame = this.copy(logQueue = LogQueueImpl())
+  private def addLog(logMessage: LogMessage) = this.copy(logQueue = logQueue.add(logMessage))
 
-  def eventFinish: Either[LogMessage, ResistanceGame] = {
-    eventQueue.finishEvent().right.map(eventHook => this.copy(eventQueue = eventHook))
+  private def checkEventEmpty(f: => Either[LogMessage, ResistanceGameImpl]) = {
+    for {
+      _ <- Either.cond(eventTable.queueEmpty, (), GameError(this, "event running")).right
+      game <- f.right
+    } yield game
   }
 
+  private def runEvent(event: GameEvent)(f: => Either[LogMessage, ResistanceGameImpl]) = {
+    for {
+      ev <- this.eventTable.getEvent.right
+      _ <- Either.cond(ev == event, (), GameError(this, s"required $event, but actual $ev.")).right
+      game <- f.right
+      eventTable <- game.eventTable.finishEvent().right
+    } yield game.copy(eventTable = eventTable)
+  }
 }
 
 object ResistanceGameImpl {
-  def create(allMembers: AllMembers): ResistanceGame = {
+  def apply(allMembers: AllMembers): ResistanceGame = {
     ResistanceGameImpl(allMembers,
       voteTrack = VoteTrackImpl(allMembers, Option(VoteRecordImpl(allMembers))),
-      missionTrack = MissionTrackImpl(allMembers),
-      eventQueue = EventTableImpl())
+      missionTrack = MissionTrackImpl(allMembers))
   }
 }
 
